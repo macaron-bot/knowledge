@@ -1,0 +1,57 @@
+name: pages
+
+# Publishes the read API (README.md, "Read API") on GitHub Pages: on pushes to main (merges by
+# the platform team), and from merge.yml after an automatic merge.
+on:
+  push:
+    branches: [main]
+  workflow_call:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  KNOWLEDGE_CLI_URL: https://github.com/open-macaron/macaron/releases/download/knowledge-cli-ee6eb2ad4cd9a15ac1ec6d907fcd49dd7c329c1f/knowledge-cli.mjs
+  KNOWLEDGE_CLI_SHA256: "b3eb08cf54418367f7dd874ef75547a1c6ed8a0db9b6d49ce824835312851584"
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      # main as it is now: when called from merge.yml, the triggering SHA predates the merge.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: knowledge-cli
+        run: |
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/knowledge-cli.mjs" "$KNOWLEDGE_CLI_URL"
+          echo "$KNOWLEDGE_CLI_SHA256  $RUNNER_TEMP/knowledge-cli.mjs" | sha256sum --check --strict -
+      - run: node "$RUNNER_TEMP/knowledge-cli.mjs" build . _site --commit "$(git rev-parse HEAD)"
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}v1/index.json
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

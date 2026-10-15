@@ -1,0 +1,17 @@
+name: review
+
+# Wakes merge.yml up when a review is submitted. Does nothing else, on purpose: for a pull
+# request from a fork, GitHub runs the pull request's own copy of this file, so merge.yml
+# trusts nothing from this run (not its result, not its outputs, not its branch).
+on:
+  pull_request_review:
+    types: [submitted]
+
+permissions: {}
+
+jobs:
+  signal:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 1
+    steps:
+      - run: echo "A review was submitted; merge.yml evaluates the pull request from scratch."

@@ -1,0 +1,116 @@
+name: merge
+
+# Merges a pull request once an owner of every folder it touches approved its latest commit
+# (README.md, "Owners and approvals"). Always runs from main, with the repository's token.
+#
+# The run that triggers this is untrusted (see check.yml, review.yml): only its head SHA is
+# used, to find which open pull request to look at. Everything else is re-derived from
+# GitHub's API and from main by knowledge-cli. No step executes the pull request's content.
+on:
+  # Deliberate: this is the privileged half of a split workflow (see the header). The trigger
+  # only says "look at this head SHA"; nothing from the triggering run is trusted.
+  workflow_run: # zizmor: ignore[dangerous-triggers]
+    workflows: [check, review]
+    types: [completed]
+
+permissions: {}
+
+# One evaluation at a time; a burst of triggers collapses into one queued run.
+concurrency:
+  group: merge
+  cancel-in-progress: false
+
+env:
+  KNOWLEDGE_CLI_URL: https://github.com/open-macaron/macaron/releases/download/knowledge-cli-ee6eb2ad4cd9a15ac1ec6d907fcd49dd7c329c1f/knowledge-cli.mjs
+  KNOWLEDGE_CLI_SHA256: "b3eb08cf54418367f7dd874ef75547a1c6ed8a0db9b6d49ce824835312851584"
+
+jobs:
+  find:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      pull-requests: read
+    outputs:
+      pr: ${{ steps.find.outputs.pr }}
+      sha: ${{ steps.find.outputs.sha }}
+    steps:
+      - id: find
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::unexpected head SHA"; exit 1; }
+          # An index only: which open pull request has this head. Not evidence of anything.
+          pr="$(gh api "repos/$GITHUB_REPOSITORY/pulls?state=open&per_page=100" --paginate \
+            --jq '.[] | select(.head.sha == $ENV.HEAD_SHA) | .number' | head -n 1)"
+          [[ -z "$pr" || "$pr" =~ ^[0-9]+$ ]] || { echo "::error::unexpected pull request number"; exit 1; }
+          echo "pr=$pr" >> "$GITHUB_OUTPUT"
+          echo "sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+          echo "${pr:+pull request #$pr}${pr:-no open pull request} at $HEAD_SHA"
+
+  validate:
+    needs: find
+    if: needs.find.outputs.pr != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      valid: ${{ steps.validate.outputs.valid }}
+    steps:
+      # The pull request's files, as data. No credentials kept, nothing from them is run.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/pull/${{ needs.find.outputs.pr }}/head
+          path: pr
+          persist-credentials: false
+      - name: the checkout is the commit being evaluated
+        env:
+          HEAD_SHA: ${{ needs.find.outputs.sha }}
+        run: test "$(git -C pr rev-parse HEAD)" = "$HEAD_SHA"
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: knowledge-cli
+        run: |
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/knowledge-cli.mjs" "$KNOWLEDGE_CLI_URL"
+          echo "$KNOWLEDGE_CLI_SHA256  $RUNNER_TEMP/knowledge-cli.mjs" | sha256sum --check --strict -
+      - id: validate
+        run: |
+          if node "$RUNNER_TEMP/knowledge-cli.mjs" validate pr; then valid=true; else valid=false; fi
+          echo "valid=$valid" >> "$GITHUB_OUTPUT"
+
+  merge:
+    needs: [find, validate]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      merged: ${{ steps.merge.outputs.merged }}
+    steps:
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: knowledge-cli
+        run: |
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/knowledge-cli.mjs" "$KNOWLEDGE_CLI_URL"
+          echo "$KNOWLEDGE_CLI_SHA256  $RUNNER_TEMP/knowledge-cli.mjs" | sha256sum --check --strict -
+      - id: merge
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ needs.find.outputs.sha }}
+          FORMAT_VALID: ${{ needs.validate.outputs.valid == 'true' }}
+        run: node "$RUNNER_TEMP/knowledge-cli.mjs" merge --head-sha "$HEAD_SHA" --format-valid "$FORMAT_VALID"
+
+  # A merge made with the repository's token triggers no push workflow: publish from here.
+  pages:
+    needs: merge
+    if: needs.merge.outputs.merged == 'true'
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    # `./`: long-standing syntax for same-repository reusable workflows (`$/` is newer).
+    uses: ./.github/workflows/pages.yml # zizmor: ignore[self-repository]
